@@ -9,11 +9,18 @@
 package main
 
 import (
+	"bytes"
+	"encoding/base64"
 	"errors"
 	"flag"
 	"fmt"
+	"io"
+	"io/ioutil"
 	"log"
+	"mime"
+	"mime/multipart"
 	"net/http"
+	"net/mail"
 	"strings"
 	"sync"
 
@@ -31,9 +38,86 @@ var (
 // Message implements smtpd.Envelope by streaming the message to all
 // connected websocket clients.
 type Message struct {
+	// HTML-escaped fields sent to the client
 	From, To string
 	Subject  string
-	Body     string
+	Body     string // includes images (via data URLs)
+
+	// internal state
+	images []image
+	buf    bytes.Buffer // for accumulating email as it comes in
+}
+
+type image struct {
+	Type string
+	Data []byte
+}
+
+func (m *Message) parse(r io.Reader) error {
+	msg, err := mail.ReadMessage(r)
+	if err != nil {
+		return err
+	}
+	m.Subject = msg.Header.Get("Subject")
+	m.To = msg.Header.Get("To")
+
+	log.Printf("Parsing message with subject %q", m.Subject)
+
+	mediaType, params, err := mime.ParseMediaType(msg.Header.Get("Content-Type"))
+	if err != nil || (mediaType != "multipart/alternative" && mediaType != "multipart/mixed") {
+		slurp, _ := ioutil.ReadAll(msg.Body)
+		m.Body = string(slurp)
+		return nil
+	}
+	// boundary
+	mr := multipart.NewReader(msg.Body, params["boundary"])
+	lastBody := ""
+	for {
+		part, err := mr.NextPart()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			return err
+		}
+		partType, partParams, _ := mime.ParseMediaType(part.Header.Get("Content-Type"))
+		log.Printf("MIME part type %q, params: %#v", partType, partParams)
+		if strings.HasPrefix(partType, "image/") && strings.HasPrefix(part.Header.Get("Content-Disposition"), "attachment") &&
+			part.Header.Get("Content-Transfer-Encoding") == "base64" {
+			slurp, _ := ioutil.ReadAll(part)
+			slurp = bytes.Map(func(r rune) rune {
+				switch r {
+				case '\n', '\r':
+					return -1
+				}
+				return r
+			}, slurp)
+			imdata, err := ioutil.ReadAll(base64.NewDecoder(base64.StdEncoding, bytes.NewReader(slurp)))
+			if err != nil {
+				log.Printf("image base64 decode error: %v", err)
+				ioutil.WriteFile("/tmp/base64err", slurp, 0600)
+				continue
+			}
+			m.images = append(m.images, image{
+				Type: partType,
+				Data: imdata,
+			})
+			continue
+		}
+		slurp, _ := ioutil.ReadAll(part)
+		if partType == "text/plain" {
+			m.Body = string(slurp)
+		} else {
+			lastBody = string(slurp)
+		}
+
+	}
+	// If we didn't find a text/plain alternative section, just use whatever we last saw.
+	if m.Body == "" {
+		m.Body = lastBody
+	}
+
+	return nil
 }
 
 func (m *Message) AddRecipient(rcpt smtpd.MailAddress) error {
@@ -46,40 +130,60 @@ func (m *Message) AddRecipient(rcpt smtpd.MailAddress) error {
 
 func (m *Message) BeginData() error { return nil }
 
-func (m *Message) Write(line []byte) error {
-	m.Body += string(line) + "\n"
-	return nil
-}
+const maxMessageSize = 5 << 20
 
-func (m *Message) Close() error {
-	for _, c := range clients() {
-		select {
-		case c <- m:
-		default:
-		}
+func (m *Message) Write(line []byte) error {
+	m.buf.Write(line)
+	if m.buf.Len() > maxMessageSize {
+		return errors.New("too big, yo")
 	}
 	return nil
 }
 
+func (m *Message) Close() error {
+	log.Printf("Got message: %q", m.buf.String())
+	ioutil.WriteFile("/tmp/lastmsg", m.buf.Bytes(), 0600)
+	if err := m.parse(&m.buf); err != nil {
+		return err
+	}
+	for _, im := range m.images {
+		m.Body = m.Body + fmt.Sprintf("<p><img src='data:%s;base64,%s'></p>", im.Type, base64.StdEncoding.EncodeToString(im.Data))
+	}
+	for _, c := range clients() {
+		c.Deliver(m)
+	}
+	return nil
+}
+
+type Client chan *Message
+
+func (c Client) Deliver(m *Message) {
+	select {
+	case c <- m:
+	default:
+		// Client is too backlogged. They don't get this message.
+	}
+}
+
 var (
 	mu        sync.Mutex // guards clientMap
-	clientMap = map[chan *Message]bool{}
+	clientMap = map[Client]bool{}
 )
 
-func register(c chan *Message) {
+func register(c Client) {
 	mu.Lock()
 	defer mu.Unlock()
 	clientMap[c] = true
 }
 
-func unregister(c chan *Message) {
+func unregister(c Client) {
 	mu.Lock()
 	defer mu.Unlock()
 	delete(clientMap, c)
 }
 
 // clients returns all connected clients.
-func clients() (cs []chan *Message) {
+func clients() (cs []Client) {
 	mu.Lock()
 	defer mu.Unlock()
 	for c := range clientMap {
@@ -90,15 +194,11 @@ func clients() (cs []chan *Message) {
 
 func streamMail(ws *websocket.Conn) {
 	log.Printf("websocket connection from %v", ws.RemoteAddr())
-	msgc := make(chan *Message, 100)
-	register(msgc)
-	defer unregister(msgc)
+	client := Client(make(chan *Message, 100))
+	register(client)
+	defer unregister(client)
 
-	deadc := make(chan bool, 2)
-
-	websocket.JSON.Send(ws, &Message{
-		Subject: "mail will appear appear",
-	})
+	deadc := make(chan bool, 1)
 
 	// Wait for incoming messages. Don't really care about them, but
 	// use this to find out if client goes away.
@@ -106,12 +206,15 @@ func streamMail(ws *websocket.Conn) {
 		var msg Message
 		for {
 			err := websocket.JSON.Receive(ws, &msg)
-			if err != nil {
+			switch err {
+			case nil:
+				log.Printf("Unexpected message from %v: %+v", ws.RemoteAddr(), msg)
+				continue
+			case io.EOF:
+			default:
 				log.Printf("Receive error from %v: %v", ws.RemoteAddr(), err)
-				deadc <- true
-				return
 			}
-			log.Printf("Got message from %v: %+v", ws.RemoteAddr(), msg)
+			deadc <- true
 		}
 	}()
 
@@ -119,7 +222,7 @@ func streamMail(ws *websocket.Conn) {
 		select {
 		case <-deadc:
 			return
-		case m := <-msgc:
+		case m := <-client:
 			err := websocket.JSON.Send(ws, m)
 			if err != nil {
 				return
@@ -141,17 +244,24 @@ function init() {
   }
   ws = new WebSocket("ws://`+*wsAddr+`/stream");
   var div = document.getElementById("mail");
-  div.innerText = "(mail goes here)";
+  div.innerText = "(mail goes here; connecting to websocket server...)";
   ws.onopen = function () {
-     div.innerText = "opened\n" + div.innerText;
+     div.innerText = "(connected; waiting for email...)\n";
   };
   ws.onmessage = function (e) {
-     div.innerText = "msg:" + e.data + "\n" + div.innerText;
+     var m = JSON.parse(e.data);
+     var md = document.createElement("div");
+     md.innerHTML = "<table style='margin-bottom: 2em'>" +
+		"<tr><td align=right><b>From:</b></td><td>" + m.From + "</td></tr>" +
+		"<tr><td align=right><b>To:</b></td><td>" + m.To + "</td></tr>" +
+		"<tr><td align=right><b>Subject:</b></td><td>" + m.Subject + "</td></tr>" +
+		"<tr valign=top><td align=right><b>Body:</b></td><td>" + m.Body + "</td></tr>" +
+                "</table>";
+     div.insertBefore(md, div.firstChild)
    };
   ws.onclose = function (e) {
-     div.innerText = "closed\n" + div.innerText;
+     div.innerHTML = "<div>(connection closed)</div>" + div.innerHTML;
   };
-  div.innerText = "did init.\n" + div.innerText;
 }
 </script>
 </head>
@@ -178,14 +288,6 @@ func main() {
 		Addr: *smtpListen,
 		OnNewMail: func(c smtpd.Connection, from smtpd.MailAddress) (smtpd.Envelope, error) {
 			log.Printf("New message from %q", from)
-			for _, c := range clients() {
-				select {
-				case c <- &Message{From: from.Email()}:
-				default:
-					// Client's websocket buffer is too backlogged. They don't
-					// get this email.
-				}
-			}
 			e := &Message{
 				From: from.Email(),
 			}

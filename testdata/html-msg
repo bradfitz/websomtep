@@ -1,0 +1,16 @@
+Subject: html subject
+From: Brad Fitzpatrick <brad@danga.com>
+To: whatever@websomtep.danga.com
+Content-Type: multipart/alternative; boundary=e89a8ff1c1e81025a804be640ec8
+
+--e89a8ff1c1e81025a804be640ec8
+Content-Type: text/plain; charset=UTF-8
+
+html *body*
+
+--e89a8ff1c1e81025a804be640ec8
+Content-Type: text/html; charset=UTF-8
+
+html <u>body</u>
+
+--e89a8ff1c1e81025a804be640ec8--

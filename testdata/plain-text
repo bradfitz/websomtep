@@ -1,0 +1,7 @@
+MIME-Version: 1.0
+Subject: plain text subject
+From: Brad Fitzpatrick <brad@danga.com>
+To: whatever@websomtep.danga.com
+Content-Type: text/plain; charset=UTF-8
+
+plain text body
