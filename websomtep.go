@@ -123,7 +123,9 @@ func (m *Message) parseMultipart(r io.Reader, boundary string) error {
 			continue
 		}
 		if strings.HasPrefix(partType, "image/") {
-			if !strings.HasPrefix(part.Header.Get("Content-Disposition"), "attachment") {
+			contentDis := part.Header.Get("Content-Disposition")
+			if !(strings.HasPrefix(contentDis, "attachment") ||
+				strings.HasPrefix(contentDis, "inline")) {
 				continue
 			}
 			if part.Header.Get("Content-Transfer-Encoding") != "base64" {
