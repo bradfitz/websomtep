@@ -47,6 +47,7 @@ type Message struct {
 
 	// internal state
 	images []image
+	bodies []string
 	buf    bytes.Buffer // for accumulating email as it comes in
 }
 
@@ -66,14 +67,31 @@ func (m *Message) parse(r io.Reader) error {
 	log.Printf("Parsing message with subject %q", m.Subject)
 
 	mediaType, params, err := mime.ParseMediaType(msg.Header.Get("Content-Type"))
-	if err != nil || (mediaType != "multipart/alternative" && mediaType != "multipart/mixed") {
+	if err != nil || !strings.HasPrefix(mediaType, "multipart/") {
 		slurp, _ := ioutil.ReadAll(msg.Body)
 		m.Body = string(slurp)
 		return nil
 	}
-	// boundary
-	mr := multipart.NewReader(msg.Body, params["boundary"])
-	lastBody := ""
+	if err := m.parseMultipart(msg.Body, params["boundary"]); err != nil {
+		return err
+	}
+	// If we didn't find a text/plain body, pick the first body we did find.
+	if m.Body == "" {
+		for _, body := range m.bodies {
+			if body != "" {
+				m.Body = body
+				break
+			}
+		}
+	}
+	return nil
+}
+
+// parseMultipart populates Body (preferring text/plain) and images,
+// and may call itself recursively, walking through multipart/mixed
+// and multipart/alternative innards.
+func (m *Message) parseMultipart(r io.Reader, boundary string) error {
+	mr := multipart.NewReader(r, boundary)
 	for {
 		part, err := mr.NextPart()
 		if err == io.EOF {
@@ -84,8 +102,20 @@ func (m *Message) parse(r io.Reader) error {
 		}
 		partType, partParams, _ := mime.ParseMediaType(part.Header.Get("Content-Type"))
 		log.Printf("MIME part type %q, params: %#v", partType, partParams)
-		if strings.HasPrefix(partType, "image/") && strings.HasPrefix(part.Header.Get("Content-Disposition"), "attachment") &&
-			part.Header.Get("Content-Transfer-Encoding") == "base64" {
+		if strings.HasPrefix(partType, "multipart/") {
+			err = m.parseMultipart(part, partParams["boundary"])
+			if err != nil {
+				return err
+			}
+			continue
+		}
+		if strings.HasPrefix(partType, "image/") {
+			if !strings.HasPrefix(part.Header.Get("Content-Disposition"), "attachment") {
+				continue
+			}
+			if part.Header.Get("Content-Transfer-Encoding") != "base64" {
+				continue
+			}
 			slurp, _ := ioutil.ReadAll(part)
 			slurp = bytes.Map(func(r rune) rune {
 				switch r {
@@ -106,19 +136,16 @@ func (m *Message) parse(r io.Reader) error {
 			})
 			continue
 		}
+		if !strings.HasPrefix(partType, "text/") {
+			continue
+		}
 		slurp, _ := ioutil.ReadAll(part)
 		if partType == "text/plain" {
 			m.Body = string(slurp)
 		} else {
-			lastBody = string(slurp)
+			m.bodies = append(m.bodies, string(slurp))
 		}
-
 	}
-	// If we didn't find a text/plain alternative section, just use whatever we last saw.
-	if m.Body == "" {
-		m.Body = lastBody
-	}
-
 	return nil
 }
 
