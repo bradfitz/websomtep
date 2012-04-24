@@ -14,6 +14,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"html"
 	"html/template"
 	"io"
 	"io/ioutil"
@@ -190,6 +191,14 @@ func (m *Message) Close() error {
 	if err := m.parse(&m.buf); err != nil {
 		return err
 	}
+
+	// This is a lame place to do this, but this is a dumb hack,
+	// so whatever.
+	for _, field := range []*string{&m.From, &m.To, &m.Subject, &m.Body} {
+		*field = html.EscapeString(*field)
+	}
+	m.Body = strings.Replace(m.Body, "\n", "<br>\n", -1)
+
 	for _, im := range m.images {
 		m.Body = m.Body + fmt.Sprintf("<p><img src='data:%s;base64,%s'></p>", im.Type, base64.StdEncoding.EncodeToString(im.Data))
 	}
