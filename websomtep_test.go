@@ -34,6 +34,14 @@ var parseTests = []parseTest{
 			"87cf0355fc364349590bc7b676d92298a2065146": "image/png",
 		},
 	},
+	{
+		File:    "mail-app-with-image",
+		Subject: "always handy design guidelines",
+		Body:    "-- \r\ndustin sallings",
+		Images: map[string]string{
+			"72ba4970bc8fa484e8ed9c8c072644a92b2faa05": "image/jpg",
+		},
+	},
 }
 
 func TestMailParsing(t *testing.T) {
