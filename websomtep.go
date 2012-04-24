@@ -185,7 +185,6 @@ func (m *Message) Write(line []byte) error {
 }
 
 func (m *Message) Close() error {
-	log.Printf("Got message: %q", m.buf.String())
 	if err := m.parse(&m.buf); err != nil {
 		return err
 	}
