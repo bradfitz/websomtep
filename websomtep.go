@@ -281,6 +281,7 @@ var uiTemplate = template.Must(template.ParseFiles("ui.html"))
 
 type uiTemplateData struct {
 	WSAddr string
+	Domain string
 }
 
 func home(w http.ResponseWriter, r *http.Request) {
@@ -294,6 +295,7 @@ func home(w http.ResponseWriter, r *http.Request) {
 	}
 	err = uiTemplate.Execute(w, uiTemplateData{
 		WSAddr: *wsAddr,
+		Domain: *domain,
 	})
 	if err != nil {
 		log.Println(err)
