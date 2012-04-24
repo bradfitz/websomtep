@@ -64,8 +64,6 @@ func (m *Message) parse(r io.Reader) error {
 	m.Subject = msg.Header.Get("Subject")
 	m.To = msg.Header.Get("To")
 
-	log.Printf("Parsing message with subject %q", m.Subject)
-
 	mediaType, params, err := mime.ParseMediaType(msg.Header.Get("Content-Type"))
 	if err != nil || !strings.HasPrefix(mediaType, "multipart/") {
 		slurp, _ := ioutil.ReadAll(msg.Body)
@@ -101,10 +99,10 @@ func (m *Message) parseMultipart(r io.Reader, boundary string) error {
 			return err
 		}
 		partType, partParams, _ := mime.ParseMediaType(part.Header.Get("Content-Type"))
-		log.Printf("MIME part type %q, params: %#v", partType, partParams)
 		if strings.HasPrefix(partType, "multipart/") {
 			err = m.parseMultipart(part, partParams["boundary"])
 			if err != nil {
+				log.Printf("in boundary %q, returning error for multipart child %q: %v", boundary, partParams["boundary"], err)
 				return err
 			}
 			continue
@@ -117,14 +115,7 @@ func (m *Message) parseMultipart(r io.Reader, boundary string) error {
 				continue
 			}
 			slurp, _ := ioutil.ReadAll(part)
-			slurp = bytes.Map(func(r rune) rune {
-				switch r {
-				case '\n', '\r':
-					return -1
-				}
-				return r
-			}, slurp)
-			imdata, err := ioutil.ReadAll(base64.NewDecoder(base64.StdEncoding, bytes.NewReader(slurp)))
+			imdata, err := ioutil.ReadAll(base64.NewDecoder(base64.StdEncoding, bytes.NewReader(removeNewlines(slurp))))
 			if err != nil {
 				log.Printf("image base64 decode error: %v", err)
 				ioutil.WriteFile("/tmp/base64err", slurp, 0600)
@@ -147,6 +138,16 @@ func (m *Message) parseMultipart(r io.Reader, boundary string) error {
 		}
 	}
 	return nil
+}
+
+func removeNewlines(p []byte) []byte {
+	return bytes.Map(func(r rune) rune {
+		switch r {
+		case '\n', '\r':
+			return -1
+		}
+		return r
+	}, p)
 }
 
 func (m *Message) AddRecipient(rcpt smtpd.MailAddress) error {
