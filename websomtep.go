@@ -133,7 +133,6 @@ func (m *Message) parseMultipart(r io.Reader, boundary string) error {
 			imdata, err := ioutil.ReadAll(base64.NewDecoder(base64.StdEncoding, bytes.NewReader(removeNewlines(slurp))))
 			if err != nil {
 				log.Printf("image base64 decode error: %v", err)
-				ioutil.WriteFile("/tmp/base64err", slurp, 0600)
 				continue
 			}
 			m.images = append(m.images, image{
@@ -187,7 +186,6 @@ func (m *Message) Write(line []byte) error {
 
 func (m *Message) Close() error {
 	log.Printf("Got message: %q", m.buf.String())
-	ioutil.WriteFile("/tmp/lastmsg", m.buf.Bytes(), 0600)
 	if err := m.parse(&m.buf); err != nil {
 		return err
 	}
