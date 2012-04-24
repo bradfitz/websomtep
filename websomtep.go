@@ -49,6 +49,11 @@ type Message struct {
 	images []image
 	bodies []string
 	buf    bytes.Buffer // for accumulating email as it comes in
+	msg    interface{}  // alternate message to send
+}
+
+type Stat struct {
+	NumClients int
 }
 
 type image struct {
@@ -179,9 +184,7 @@ func (m *Message) Close() error {
 	for _, im := range m.images {
 		m.Body = m.Body + fmt.Sprintf("<p><img src='data:%s;base64,%s'></p>", im.Type, base64.StdEncoding.EncodeToString(im.Data))
 	}
-	for _, c := range clients() {
-		c.Deliver(m)
-	}
+	broadcast(m)
 	if *debug {
 		backlog = append(backlog, m)
 	}
@@ -218,14 +221,18 @@ var (
 
 func register(c Client) {
 	mu.Lock()
-	defer mu.Unlock()
 	clientMap[c] = true
+	n := len(clientMap)
+	mu.Unlock()
+	broadcast(&Message{msg: &Stat{NumClients: n}})
 }
 
 func unregister(c Client) {
 	mu.Lock()
-	defer mu.Unlock()
 	delete(clientMap, c)
+	n := len(clientMap)
+	mu.Unlock()
+	broadcast(&Message{msg: &Stat{NumClients: n}})
 }
 
 // clients returns all connected clients.
@@ -236,6 +243,12 @@ func clients() (cs []Client) {
 		cs = append(cs, c)
 	}
 	return
+}
+
+func broadcast(m *Message) {
+	for _, c := range clients() {
+		c.Deliver(m)
+	}
 }
 
 func streamMail(ws *websocket.Conn) {
@@ -269,7 +282,12 @@ func streamMail(ws *websocket.Conn) {
 		case <-deadc:
 			return
 		case m := <-client:
-			err := websocket.JSON.Send(ws, m)
+			var err error
+			if m.msg != nil {
+				err = websocket.JSON.Send(ws, m.msg)
+			} else {
+				err = websocket.JSON.Send(ws, m)
+			}
 			if err != nil {
 				return
 			}
