@@ -14,6 +14,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"html/template"
 	"io"
 	"io/ioutil"
 	"log"
@@ -33,6 +34,7 @@ var (
 	smtpListen = flag.String("smtp", ":2500", "address to listen for SMTP on")
 	domain     = flag.String("domain", "websomtep.danga.com", "required domain name in RCPT lines")
 	wsAddr     = flag.String("ws", "websomtep.danga.com", "websocket host[:port], as seen by JavaScript")
+	debug      = flag.Bool("debug", false, "enable debug features")
 )
 
 // Message implements smtpd.Envelope by streaming the message to all
@@ -152,7 +154,23 @@ func (m *Message) Close() error {
 	for _, c := range clients() {
 		c.Deliver(m)
 	}
+	if *debug {
+		backlog = append(backlog, m)
+	}
 	return nil
+}
+
+var backlog []*Message
+
+func resend(w http.ResponseWriter, r *http.Request) {
+	l := len(backlog)
+	if l == 0 {
+		return
+	}
+	m := backlog[l-1]
+	for _, c := range clients() {
+		c.Deliver(m)
+	}
 }
 
 type Client chan *Message
@@ -231,55 +249,36 @@ func streamMail(ws *websocket.Conn) {
 	}
 }
 
-func home(w http.ResponseWriter, r *http.Request) {
-	fmt.Fprintf(w, `<html>
-<head>
-<script type="text/javascript">
-var ws;
-function init() {
-  console.log("init.");
-  if (ws != null) {
-     ws.close();
-     ws = null;
-  }
-  ws = new WebSocket("ws://`+*wsAddr+`/stream");
-  var div = document.getElementById("mail");
-  div.innerText = "(mail goes here; connecting to websocket server...)";
-  ws.onopen = function () {
-     div.innerText = "(connected; waiting for email...)\n";
-  };
-  ws.onmessage = function (e) {
-     var m = JSON.parse(e.data);
-     var md = document.createElement("div");
-     md.innerHTML = "<table style='margin-bottom: 2em'>" +
-		"<tr><td align=right><b>From:</b></td><td>" + m.From + "</td></tr>" +
-		"<tr><td align=right><b>To:</b></td><td>" + m.To + "</td></tr>" +
-		"<tr><td align=right><b>Subject:</b></td><td>" + m.Subject + "</td></tr>" +
-		"<tr valign=top><td align=right><b>Body:</b></td><td>" + m.Body + "</td></tr>" +
-                "</table>";
-     div.insertBefore(md, div.firstChild)
-   };
-  ws.onclose = function (e) {
-     div.innerHTML = "<div>(connection closed)</div>" + div.innerHTML;
-  };
+var uiTemplate = template.Must(template.ParseFiles("ui.html"))
+
+type uiTemplateData struct {
+	WSAddr string
 }
-</script>
-</head>
-<body onLoad="init();">
-<h1>websomtep -- websockets + SMTP</h1>
-<p>This is an SMTP server written in <a href="http://golang.org/">Go</a> which streams incoming mail to your (and everybody else's) active WebSocket connection.</p>
-<p>Test it! Email <a href="mailto:whatever@websomtep.danga.com"><b><i>whatever</i>@websomtep.danga.com</b></a>.</p>
-<p>Source code is here: <a href="https://github.com/bradfitz/websomtep">https://github.com/bradfitz/websomtep</a>.</p>
-<h2>Mail:</h2>
-<div id='mail'></div>
-</body>
-			</html>`)
+
+func home(w http.ResponseWriter, r *http.Request) {
+	var err error
+	if *debug {
+		uiTemplate, err = template.ParseFiles("ui.html")
+		if err != nil {
+			fmt.Fprint(w, err)
+			return
+		}
+	}
+	err = uiTemplate.Execute(w, uiTemplateData{
+		WSAddr: *wsAddr,
+	})
+	if err != nil {
+		log.Println(err)
+	}
 }
 
 func main() {
 	flag.Parse()
 
 	http.HandleFunc("/", home)
+	if *debug {
+		http.HandleFunc("/resend", resend)
+	}
 	http.Handle("/stream", websocket.Handler(streamMail))
 	log.Printf("websomtep listening for HTTP on %q and SMTP on %q\n", *webListen, *smtpListen)
 	go http.ListenAndServe(*webListen, nil)

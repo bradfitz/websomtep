@@ -1,0 +1,42 @@
+<html>
+<head>
+<script type="text/javascript">
+var ws;
+function init() {
+  console.log("init.");
+  if (ws != null) {
+     ws.close();
+     ws = null;
+  }
+  ws = new WebSocket("ws://{{.WSAddr}}/stream");
+  var div = document.getElementById("mail");
+  div.innerText = "(mail goes here; connecting to websocket server...)";
+  ws.onopen = function () {
+     div.innerText = "(connected; waiting for email...)\n";
+  };
+  ws.onmessage = function (e) {
+     var m = JSON.parse(e.data);
+     var md = document.createElement("div");
+     md.innerHTML = "<table style='margin-bottom: 2em'>" +
+		"<tr><td align=right><b>From:</b></td><td>" + m.From + "</td></tr>" +
+		"<tr><td align=right><b>To:</b></td><td>" + m.To + "</td></tr>" +
+		"<tr><td align=right><b>Subject:</b></td><td>" + m.Subject + "</td></tr>" +
+		"<tr valign=top><td align=right><b>Body:</b></td><td>" + m.Body + "</td></tr>" +
+                "</table>";
+     div.insertBefore(md, div.firstChild)
+   };
+  ws.onclose = function (e) {
+     div.innerHTML = "<div>(connection closed)</div>" + div.innerHTML;
+  };
+}
+</script>
+</head>
+<body onLoad="init();">
+<h1>websomtep -- websockets + SMTP</h1>
+<p>This is an SMTP server written in <a href="http://golang.org/">Go</a> which streams incoming mail to your (and everybody else's) active WebSocket connection.</p>
+<p>Test it! Email <a href="mailto:whatever@websomtep.danga.com"><b><i>whatever</i>@websomtep.danga.com</b></a>.</p>
+<p>Source code is here: <a href="https://github.com/bradfitz/websomtep">https://github.com/bradfitz/websomtep</a>.</p>
+<h2>Mail:</h2>
+<div id='mail'></div>
+</body>
+</html>
