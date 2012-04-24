@@ -123,9 +123,14 @@ func (m *Message) parseMultipart(r io.Reader, boundary string) error {
 			continue
 		}
 		if strings.HasPrefix(partType, "image/") {
+			switch partType {
+			case "image/gif", "image/png", "image/jpeg":
+			default:
+				// Probably http://golang.org/issue/3562
+				continue
+			}
 			contentDis := part.Header.Get("Content-Disposition")
-			if !(strings.HasPrefix(contentDis, "attachment") ||
-				strings.HasPrefix(contentDis, "inline")) {
+			if !(strings.HasPrefix(contentDis, "attachment") || strings.HasPrefix(contentDis, "inline")) {
 				continue
 			}
 			if part.Header.Get("Content-Transfer-Encoding") != "base64" {
