@@ -20,6 +20,7 @@ import (
 	"log"
 	"mime"
 	"mime/multipart"
+	"net"
 	"net/http"
 	"net/mail"
 	"strings"
@@ -52,8 +53,16 @@ type Message struct {
 	msg    interface{}  // alternate message to send
 }
 
+// Stat is a JSON status message sent to clients when the number
+// of connected WebSocket clients change.
 type Stat struct {
 	NumClients int
+}
+
+// SMTPStat is a JSON status message sent to clients when the number
+// of connected SMTP clients change.
+type SMTPStat struct {
+	NumSenders int
 }
 
 type image struct {
@@ -320,6 +329,44 @@ func home(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// countingListener tracks how many outstanding connections are open
+// from l, running fn on changel
+type countingListener struct {
+	net.Listener
+	fn func(int)
+	mu sync.Mutex // guards n
+	n  int
+}
+
+func (cl *countingListener) inc(delta int) {
+	cl.mu.Lock()
+	cl.n += delta
+	defer cl.fn(cl.n)
+	cl.mu.Unlock()
+}
+
+func (cl *countingListener) Accept() (c net.Conn, err error) {
+	c, err = cl.Listener.Accept()
+	if err == nil {
+		cl.inc(1)
+		c = &watchCloseConn{c, cl}
+	}
+	return
+}
+
+type watchCloseConn struct {
+	net.Conn
+	cl *countingListener
+}
+
+func (w *watchCloseConn) Close() error {
+	if cl := w.cl; cl != nil {
+		cl.inc(-1)
+		w.cl = nil
+	}
+	return w.Conn.Close()
+}
+
 func main() {
 	flag.Parse()
 
@@ -328,11 +375,16 @@ func main() {
 		http.HandleFunc("/resend", resend)
 	}
 	http.Handle("/stream", websocket.Handler(streamMail))
+
+	sln, err := net.Listen("tcp", *smtpListen)
+	if err != nil {
+		log.Fatalf("error listening for SMTP: %v", err)
+	}
+
 	log.Printf("websomtep listening for HTTP on %q and SMTP on %q\n", *webListen, *smtpListen)
 	go http.ListenAndServe(*webListen, nil)
 
 	s := &smtpd.Server{
-		Addr: *smtpListen,
 		OnNewMail: func(c smtpd.Connection, from smtpd.MailAddress) (smtpd.Envelope, error) {
 			log.Printf("New message from %q", from)
 			e := &Message{
@@ -341,7 +393,15 @@ func main() {
 			return e, nil
 		},
 	}
-	err := s.ListenAndServe()
+
+	smtpCountListener := &countingListener{
+		Listener: sln,
+		fn: func(count int) {
+			broadcast(&Message{msg: &SMTPStat{NumSenders: count}})
+		},
+	}
+
+	err = s.Serve(smtpCountListener)
 	if err != nil {
 		log.Fatalf("ListenAndServe: %v", err)
 	}

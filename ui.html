@@ -6,16 +6,28 @@ function init() {
   console.log("init.");
   var mail = document.getElementById("mail");
   var status = document.getElementById("status");
+  var numClients = 0;
+  var numSenders = 0;
   function onOpen() {
      status.innerText = "connected";
   };
   function onClose() {
      status.innerHTML = "connection closed";
   };
+  function updateStatus() {
+     status.innerHTML = "connected<br>(" + numClients + " browsers, " + numSenders + " SMTP clients)";
+     return;
+  }
   function onMessage(e) {
      var m = JSON.parse(e.data);
      if (m.NumClients != null) {
-         status.innerHTML = "connected<br>(" + m.NumClients + " clients)";
+         numClients = m.NumClients;
+         updateStatus();
+         return;
+     }
+     if (m.NumSenders != null) {
+         numSenders = m.NumSenders;
+         updateStatus();
          return;
      }
      console.log(m);
@@ -57,9 +69,6 @@ p {
 	margin: 0;
 }
 #status {
-	border: 1px solid grey;
-	width: 110px;
-	text-align: center;
 	padding: 10px;
 	margin-bottom: 1em;
 }
